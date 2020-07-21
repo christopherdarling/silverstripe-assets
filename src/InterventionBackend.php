@@ -2,24 +2,24 @@
 
 namespace SilverStripe\Assets;
 
+use LogicException;
 use BadMethodCallException;
-use Intervention\Image\Constraint;
-use Intervention\Image\Exception\NotReadableException;
-use Intervention\Image\Exception\NotSupportedException;
-use Intervention\Image\Exception\NotWritableException;
-use Intervention\Image\Image as InterventionImage;
-use Intervention\Image\ImageManager;
 use Intervention\Image\Size;
 use InvalidArgumentException;
-use LogicException;
-use Psr\Http\Message\StreamInterface;
-use Psr\SimpleCache\CacheInterface;
-use SilverStripe\Assets\Storage\AssetContainer;
-use SilverStripe\Assets\Storage\AssetStore;
-use SilverStripe\Core\Config\Configurable;
 use SilverStripe\Core\Flushable;
-use SilverStripe\Core\Injector\Injector;
+use Intervention\Image\Constraint;
+use Psr\SimpleCache\CacheInterface;
+use Intervention\Image\ImageManager;
 use SilverStripe\Core\Config\Config;
+use Psr\Http\Message\StreamInterface;
+use SilverStripe\Core\Injector\Injector;
+use SilverStripe\Core\Config\Configurable;
+use SilverStripe\Assets\Storage\AssetStore;
+use SilverStripe\Assets\Storage\AssetContainer;
+use Intervention\Image\Image as InterventionImage;
+use Intervention\Image\Exception\NotReadableException;
+use Intervention\Image\Exception\NotWritableException;
+use Intervention\Image\Exception\NotSupportedException;
 
 class InterventionBackend implements Image_Backend, Flushable
 {
@@ -255,29 +255,61 @@ class InterventionBackend implements Image_Backend, Flushable
         // Handle resource
         $error = self::FAILED_UNKNOWN;
         try {
-            // write the file to a local path so we can extract exif data if it exists.
-            // Currently exif data can only be read from file paths and not streams
-            $tempPath = $this->config()->get('local_temp_path') ?? TEMP_PATH;
-            $path = tempnam($tempPath, 'interventionimage_');
-            if ($extension = pathinfo($assetContainer->getFilename(), PATHINFO_EXTENSION)) {
-                //tmpnam creates a file, we should clean it up if we are changing the path name
-                unlink($path);
-                $path .= "." . $extension;
+            // default value if reading exif data fails
+            $orientation = false;
+
+            // Try to read exif data from stream resource, fail silently
+            // This needs to be done before `getImageManager()->make()` because
+            // somewhere along that process the stream changes and exif becomes
+            // unreadable
+            try {
+                $exif = @exif_read_data($stream);
+
+                if (!$exif || !array_key_exists('Orientation', $exif)) {
+                    throw new NotSupportedException('missing exif or exif[Orientation]');
+                }
+
+                $orientation = $exif['Orientation'];
             }
-            $bytesWritten = file_put_contents($path, $stream);
-            // if we fail to write, then load from stream
-            if ($bytesWritten === false) {
-                $resource = $this->getImageManager()->make($stream);
-            } else {
-                $this->setTempPath($path);
-                $resource = $this->getImageManager()->make($path);
+            catch (NotSupportedException $e) {
+                // noop
             }
 
-            // Fix image orientation
-            try {
-                $resource->orientate();
-            } catch (NotSupportedException $e) {
-                // noop - we can't orientate, don't worry about it
+            // load the resouce from stream
+            $resource = $this->getImageManager()->make($stream);
+
+            // If we have a orientation handle rotation as per
+            // `Intervention\Image\Commands\OrientateCommand`
+            if ($orientation) {
+                switch ($orientation) {
+                    case 2:
+                        $resource->flip();
+                        break;
+
+                    case 3:
+                        $resource->rotate(180);
+                        break;
+
+                    case 4:
+                        $resource->rotate(180)->flip();
+                        break;
+
+                    case 5:
+                        $resource->rotate(270)->flip();
+                        break;
+
+                    case 6:
+                        $resource->rotate(270);
+                        break;
+
+                    case 7:
+                        $resource->rotate(90)->flip();
+                        break;
+
+                    case 8:
+                        $resource->rotate(90);
+                        break;
+                }
             }
 
             $this->setImageResource($resource);
